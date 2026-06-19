@@ -2,6 +2,7 @@ services:
   - type: web
     name: phantommail-server
     env: node
+    plan: free
     rootDir: server
     buildCommand: npm install
     startCommand: npm start
