@@ -5,7 +5,7 @@ import { encryptMessage } from '../utils/crypto';
 export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
   const [form, setForm] = useState({
     to: defaultTo, subject: '', body: '',
-    hops: 3, ephemeral: false,
+    hops: 3, ttl: 'never',
   });
   const [status, setStatus] = useState('');
   const [error,  setError]  = useState('');
@@ -65,13 +65,20 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
 
       // Step 3: send the ciphertext to server
       setStatus('Sending through relay…');
+      const isEphemeral = form.ttl !== 'never';
+      let expiresAt = null;
+      if (isEphemeral) {
+        const hours = form.ttl === '1h' ? 1 : form.ttl === '24h' ? 24 : 168;
+        expiresAt = Date.now() + hours * 3600 * 1000;
+      }
+
       await api.post('/messages/send', {
         recipient_alias:  form.to.trim(),
         subject_encrypted: subjectEncrypted,
         body_encrypted:    bodyEncrypted,
         routing_hops:      form.hops,
-        is_ephemeral:      form.ephemeral,
-        ephemeral_hours:   48,
+        is_ephemeral:      isEphemeral,
+        expires_at:        expiresAt,
       });
 
       setStatus('✓ Delivered');
@@ -131,10 +138,22 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
 
         {/* Footer */}
         <div style={s.footer}>
-          <label style={s.ephemeralLabel}>
-            <input type="checkbox" checked={form.ephemeral} onChange={set('ephemeral')} />
-            &nbsp;Ephemeral — auto-delete in 48 h
-          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <label style={{ fontSize: '12px', color: '#8892a4', fontFamily: 'inherit' }}>TTL:</label>
+            <select
+              style={{
+                background: '#171b22', border: '1px solid #232839', color: '#e8eaf0',
+                borderRadius: '4px', fontSize: '12px', padding: '4px 8px', cursor: 'pointer', outline: 'none'
+              }}
+              value={form.ttl}
+              onChange={(e) => setForm({ ...form, ttl: e.target.value })}
+            >
+              <option value="never">No Expiry</option>
+              <option value="1h">1 Hour</option>
+              <option value="24h">24 Hours</option>
+              <option value="7d">7 Days</option>
+            </select>
+          </div>
 
           <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto', alignItems: 'center' }}>
             {status && <span style={s.statusText}>{status}</span>}
@@ -150,7 +169,7 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
         <div style={s.badgeRow}>
           <span style={s.badge('#00e5a0')}>E2E Encrypted</span>
           <span style={s.badge('#6a9fff')}>{form.hops} Relay Hops</span>
-          {form.ephemeral && <span style={s.badge('#ff8888')}>Ephemeral</span>}
+          {form.ttl !== 'never' && <span style={s.badge('#ff8888')}>Ephemeral ({form.ttl})</span>}
           <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#4a5568', fontFamily: 'monospace' }}>
             Private key never leaves your device
           </span>

@@ -68,9 +68,21 @@ router.post('/login', async (req, res) => {
 // GET /api/auth/me
 router.get('/me', requireAuth, async (req, res) => {
   const user = await db.prepare(
-    'SELECT id, username, alias, public_key, created_at FROM users WHERE id = ?'
+    'SELECT id, username, alias, public_key, created_at, allow_read_receipts FROM users WHERE id = ?'
   ).get(req.user.id);
   res.json(user);
+});
+
+// POST /api/auth/settings
+router.post('/settings', requireAuth, async (req, res) => {
+  const { allow_read_receipts } = req.body;
+  const flag = allow_read_receipts ? 1 : 0;
+  try {
+    await db.prepare('UPDATE users SET allow_read_receipts = ? WHERE id = ?').run(flag, req.user.id);
+    res.json({ message: 'Settings updated', allow_read_receipts: flag });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 module.exports = router;

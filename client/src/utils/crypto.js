@@ -126,3 +126,84 @@ function b642ab(b64) {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 }
+
+export async function exportKeystore(privateKeyB64, publicKeyB64, alias, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+
+  const passwordKey = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(passphrase),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveKey']
+  );
+
+  const aesKey = await crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt,
+      iterations: 100000,
+      hash: 'SHA-256'
+    },
+    passwordKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    aesKey,
+    new TextEncoder().encode(privateKeyB64)
+  );
+
+  return JSON.stringify({
+    alias,
+    salt: ab2b64(salt),
+    iv: ab2b64(iv),
+    ciphertext: ab2b64(encrypted),
+    version: 1
+  });
+}
+
+export async function importKeystore(backupJson, passphrase) {
+  try {
+    const backup = JSON.parse(backupJson);
+    const salt = b642ab(backup.salt);
+    const iv = b642ab(backup.iv);
+    const ciphertext = b642ab(backup.ciphertext);
+
+    const passwordKey = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(passphrase),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveKey']
+    );
+
+    const aesKey = await crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt,
+        iterations: 100000,
+        hash: 'SHA-256'
+      },
+      passwordKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['decrypt']
+    );
+
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv },
+      aesKey,
+      ciphertext
+    );
+
+    return new TextDecoder().decode(decrypted);
+  } catch (err) {
+    console.error('Keystore import error:', err);
+    throw new Error('Wrong passphrase or corrupted backup file.', { cause: err });
+  }
+}

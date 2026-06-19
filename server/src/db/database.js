@@ -41,7 +41,8 @@ async function initDB() {
     alias         TEXT UNIQUE NOT NULL,
     public_key    TEXT,
     created_at    INTEGER NOT NULL,
-    last_seen     INTEGER
+    last_seen     INTEGER,
+    allow_read_receipts INTEGER DEFAULT 1
   )`);
 
   await run(`CREATE TABLE IF NOT EXISTS messages (
@@ -63,6 +64,13 @@ async function initDB() {
     public_key TEXT NOT NULL,
     updated_at INTEGER NOT NULL
   )`);
+
+  // Migration: Add allow_read_receipts to users table if it doesn't exist
+  try {
+    await run('ALTER TABLE users ADD COLUMN allow_read_receipts INTEGER DEFAULT 1');
+  } catch (err) {
+    // Ignore error if column already exists
+  }
 
   console.log('✓ Database ready');
 }

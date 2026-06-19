@@ -1,6 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { decryptMessage, loadPrivateKey } from '../utils/crypto';
+import { 
+  decryptMessage, 
+  loadPrivateKey,
+  exportKeystore,
+  importKeystore,
+  generateKeyPair,
+  savePrivateKey
+} from '../utils/crypto';
 import { getSocket } from '../utils/socket';
 import ComposeModal from '../components/ComposeModal';
 import api from '../utils/api';
@@ -43,24 +50,57 @@ export default function InboxPage() {
   const [copied,    setCopied]    = useState(false);
   const [senderPresence, setSenderPresence] = useState({ online: false, lastSeen: null, loading: false });
 
+  // Keyring & settings states
+  const [passphraseExport, setPassphraseExport] = useState('');
+  const [passphraseImport, setPassphraseImport] = useState('');
+  const [importFile, setImportFile] = useState(null);
+  const [keyringStatus, setKeyringStatus] = useState('');
+  const [keyringError, setKeyringError] = useState('');
+  const [allowReceipts, setAllowReceipts] = useState(user?.allow_read_receipts ?? 1);
+
   // ── Data fetching ──────────────────────────────────────────
 
-  const fetchInbox = useCallback(async () => {
+  const fetchMessages = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await api.get('/messages/inbox');
-      setMessages(res.data);
+      if (activeNav === 'inbox') {
+        const res = await api.get('/messages/inbox');
+        setMessages(res.data);
+      } else if (activeNav === 'sent') {
+        const res = await api.get('/messages/sent/list');
+        setMessages(res.data);
+      } else if (activeNav === 'ephemeral') {
+        const res = await api.get('/messages/inbox');
+        setMessages(res.data.filter(m => m.is_ephemeral));
+      }
     } catch (e) {
-      console.error('Inbox fetch error:', e);
+      console.error('Fetch messages error:', e);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeNav]);
 
   useEffect(() => {
     Promise.resolve().then(() => {
-      fetchInbox();
+      if (activeNav !== 'keyring') {
+        fetchMessages();
+      }
     });
-  }, [fetchInbox]);
+  }, [fetchMessages, activeNav]);
+
+  // Sync settings when entering keyring
+  useEffect(() => {
+    if (activeNav === 'keyring') {
+      api.get('/auth/me')
+        .then(res => {
+          setAllowReceipts(res.data.allow_read_receipts ?? 1);
+          const savedUser = JSON.parse(localStorage.getItem('pm_user') || '{}');
+          savedUser.allow_read_receipts = res.data.allow_read_receipts;
+          localStorage.setItem('pm_user', JSON.stringify(savedUser));
+        })
+        .catch(err => console.error('Error syncing settings:', err));
+    }
+  }, [activeNav]);
 
   // Listen for real-time WebSocket events when socket is connected
   useEffect(() => {
@@ -69,9 +109,11 @@ export default function InboxPage() {
 
     const handleNewMessage = (msg) => {
       setMessages(prev => {
-        // Prevent duplicate messages if any
         if (prev.some(m => m.id === msg.id)) return prev;
-        return [msg, ...prev];
+        if (activeNav === 'inbox' || (activeNav === 'ephemeral' && msg.is_ephemeral)) {
+          return [msg, ...prev];
+        }
+        return prev;
       });
     };
 
@@ -79,21 +121,32 @@ export default function InboxPage() {
     return () => {
       socket.off('new_message', handleNewMessage);
     };
-  }, [socketConnected]);
+  }, [socketConnected, activeNav]);
 
   // Poll for new messages every 15 seconds ONLY as a fallback if WebSocket is disconnected
   useEffect(() => {
-    if (socketConnected) return;
+    if (socketConnected || activeNav === 'keyring') return;
 
-    const interval = setInterval(fetchInbox, 15000);
+    const interval = setInterval(fetchMessages, 15000);
     return () => clearInterval(interval);
-  }, [fetchInbox, socketConnected]);
+  }, [fetchMessages, socketConnected, activeNav]);
 
   // ── Actions ────────────────────────────────────────────────
 
   const openMessage = async (msg) => {
     setSelected(msg);
     setDecrypted({ subject: '', body: '' });
+
+    if (activeNav === 'sent') {
+      setDecrypted({
+        subject: '🔒 Encrypted message payload',
+        body: 'This message was encrypted with the recipient\'s public key before leaving your browser.\n\nTo preserve zero-knowledge privacy, only the recipient possesses the private key required to decrypt this message. The ciphertext remains secure on the relay node.',
+      });
+      setDecrypting(false);
+      setSenderPresence({ online: false, lastSeen: null, loading: false });
+      return;
+    }
+
     setDecrypting(true);
     setSenderPresence({ online: false, lastSeen: null, loading: true });
 
@@ -145,6 +198,208 @@ export default function InboxPage() {
     setSelected(null);
   };
 
+  // ── Keyring & settings handlers ──────────────────────────────────
+
+  const handleExport = async () => {
+    if (!passphraseExport) return;
+    setKeyringStatus('Encrypting keys...');
+    setKeyringError('');
+    try {
+      const pk = loadPrivateKey();
+      if (!pk) throw new Error('No local private key found to export.');
+
+      const backupJson = await exportKeystore(pk, user.public_key, user.alias, passphraseExport);
+
+      const blob = new Blob([backupJson], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `phantommail_backup_${user.alias}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      setKeyringStatus('✓ Keystore exported successfully.');
+      setPassphraseExport('');
+    } catch (err) {
+      setKeyringError(err.message || 'Export failed.');
+      setKeyringStatus('');
+    }
+  };
+
+  const handleImport = async () => {
+    if (!importFile || !passphraseImport) return;
+    setKeyringStatus('Decrypting keys...');
+    setKeyringError('');
+    try {
+      const text = await importFile.text();
+      const privateKey = await importKeystore(text, passphraseImport);
+
+      savePrivateKey(privateKey);
+
+      setKeyringStatus('✓ Keystore imported and loaded successfully.');
+      setPassphraseImport('');
+      setImportFile(null);
+
+      const fileInput = document.getElementById('keystore-file-input');
+      if (fileInput) fileInput.value = '';
+    } catch (err) {
+      setKeyringError(err.message || 'Import failed.');
+      setKeyringStatus('');
+    }
+  };
+
+  const handleRegenerate = async () => {
+    if (!window.confirm('WARNING: Regenerating your key pair will replace your existing local keys. If you have old encrypted messages and have not backed up your keys, you will lose access to them forever. Do you want to continue?')) return;
+    setKeyringStatus('Generating new keys...');
+    setKeyringError('');
+    try {
+      const keys = await generateKeyPair();
+
+      await api.post('/keys/upload', { public_key: keys.publicKey });
+      savePrivateKey(keys.privateKey);
+
+      setKeyringStatus('✓ New key pair generated and published successfully.');
+    } catch (err) {
+      setKeyringError(err.message || 'Key generation failed.');
+      setKeyringStatus('');
+    }
+  };
+
+  const handleToggleReceipts = async (checked) => {
+    setAllowReceipts(checked ? 1 : 0);
+    try {
+      await api.post('/auth/settings', { allow_read_receipts: checked });
+      const savedUser = JSON.parse(localStorage.getItem('pm_user') || '{}');
+      savedUser.allow_read_receipts = checked ? 1 : 0;
+      localStorage.setItem('pm_user', JSON.stringify(savedUser));
+    } catch (e) {
+      console.error('Failed to save settings:', e);
+    }
+  };
+
+  const renderKeyRingPanel = () => {
+    const pkExists = !!loadPrivateKey();
+    return (
+      <div style={{ flex: 1, display: 'flex', gap: '20px', padding: '24px', overflowY: 'auto', background: '#0a0b0e' }}>
+        
+        {/* Left Column: Key Status */}
+        <div style={{ flex: 1, background: '#111318', border: '1px solid #232839', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <h3 style={{ fontSize: '15px', fontWeight: '600', borderBottom: '1px solid #232839', paddingBottom: '10px', color: '#00e5a0', fontFamily: 'monospace' }}>
+            🔑 Keys & Identity
+          </h3>
+          
+          <div>
+            <div style={{ fontSize: '11px', color: '#4a5568', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: '4px' }}>My Alias</div>
+            <div style={{ fontSize: '13px', color: '#00e5a0', fontFamily: 'monospace' }}>{user?.alias}</div>
+          </div>
+          
+          <div>
+            <div style={{ fontSize: '11px', color: '#4a5568', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: '4px' }}>Public Key</div>
+            <div style={{ fontSize: '10px', color: '#8892a4', fontFamily: 'monospace', wordBreak: 'break-all', background: '#171b22', padding: '8px', borderRadius: '6px', border: '1px solid #232839', maxHeight: '100px', overflowY: 'auto' }}>
+              {user?.public_key || 'No public key uploaded'}
+            </div>
+          </div>
+          
+          <div>
+            <div style={{ fontSize: '11px', color: '#4a5568', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: '4px' }}>Private Key Status</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: pkExists ? '#00e5a0' : '#ff8888' }} />
+              <span style={{ color: pkExists ? '#e8eaf0' : '#ff8888', fontWeight: '600' }}>
+                {pkExists ? 'Stored locally in browser' : 'MISSING! You cannot decrypt incoming messages.'}
+              </span>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 'auto', borderTop: '1px solid #232839', paddingTop: '16px' }}>
+            <button 
+              onClick={handleRegenerate}
+              style={{ background: 'rgba(255,136,136,0.1)', border: '1px solid rgba(255,136,136,0.3)', color: '#ff8888', padding: '10px 14px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontFamily: 'inherit', fontWeight: '600' }}
+            >
+              🔄 Regenerate Key Pair
+            </button>
+          </div>
+        </div>
+
+        {/* Right Column: Backup & Restore */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          
+          {/* Export Keystore */}
+          <div style={{ background: '#111318', border: '1px solid #232839', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '600', color: '#e8eaf0' }}>📥 Export Keystore Backup</h3>
+            <p style={{ fontSize: '12px', color: '#8892a4', lineHeight: '1.5' }}>
+              Download a passphrase-encrypted file of your key pair. Keep this file safe. You will need it to login from other devices.
+            </p>
+            <input 
+              type="password"
+              placeholder="Enter encryption passphrase (min 8 chars)"
+              value={passphraseExport}
+              onChange={(e) => setPassphraseExport(e.target.value)}
+              style={{ background: '#171b22', border: '1px solid #232839', color: '#e8eaf0', padding: '10px', borderRadius: '6px', fontSize: '12px', outline: 'none' }}
+            />
+            <button 
+              disabled={passphraseExport.length < 8}
+              onClick={handleExport}
+              style={{ background: '#00e5a0', color: '#000', border: 'none', padding: '10px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: '700', cursor: 'pointer', opacity: passphraseExport.length < 8 ? 0.6 : 1 }}
+            >
+              🔐 Export & Download
+            </button>
+          </div>
+
+          {/* Import Keystore */}
+          <div style={{ background: '#111318', border: '1px solid #232839', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '600', color: '#e8eaf0' }}>📤 Import Keystore Backup</h3>
+            <p style={{ fontSize: '12px', color: '#8892a4', lineHeight: '1.5' }}>
+              Upload your encrypted backup file and enter the passphrase to restore your private key.
+            </p>
+            <input 
+              id="keystore-file-input"
+              type="file"
+              accept=".json"
+              onChange={(e) => setImportFile(e.target.files[0])}
+              style={{ fontSize: '12px', color: '#8892a4' }}
+            />
+            <input 
+              type="password"
+              placeholder="Enter backup passphrase"
+              value={passphraseImport}
+              onChange={(e) => setPassphraseImport(e.target.value)}
+              style={{ background: '#171b22', border: '1px solid #232839', color: '#e8eaf0', padding: '10px', borderRadius: '6px', fontSize: '12px', outline: 'none' }}
+            />
+            <button 
+              disabled={!importFile || !passphraseImport}
+              onClick={handleImport}
+              style={{ background: 'rgba(0,229,160,0.1)', border: '1px solid rgba(0,229,160,0.3)', color: '#00e5a0', padding: '10px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', opacity: (!importFile || !passphraseImport) ? 0.6 : 1 }}
+            >
+              🔓 Decrypt & Import
+            </button>
+          </div>
+
+          {/* Privacy Settings */}
+          <div style={{ background: '#111318', border: '1px solid #232839', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '600', color: '#e8eaf0' }}>⚙️ Privacy Settings</h3>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#e8eaf0', cursor: 'pointer' }}>
+              <input 
+                type="checkbox"
+                checked={allowReceipts === 1}
+                onChange={(e) => handleToggleReceipts(e.target.checked)}
+              />
+              Send read receipts (optional)
+            </label>
+            <p style={{ fontSize: '11px', color: '#4a5568', lineHeight: '1.4' }}>
+              If disabled, other users will not see when you read/decrypt their messages.
+            </p>
+          </div>
+
+          {/* Feedback messages */}
+          {keyringStatus && <div style={{ color: '#00e5a0', fontSize: '12px', fontFamily: 'monospace' }}>{keyringStatus}</div>}
+          {keyringError && <div style={{ color: '#ff8888', fontSize: '12px', fontFamily: 'monospace' }}>{keyringError}</div>}
+
+        </div>
+
+      </div>
+    );
+  };
+
   const copyAlias = () => {
     navigator.clipboard.writeText(user.alias);
     setCopied(true);
@@ -192,6 +447,7 @@ export default function InboxPage() {
       </div>
 
       {/* ── MAIN LAYOUT ── */}
+      {/* ── MAIN LAYOUT ── */}
       <div style={s.main}>
 
         {/* Sidebar */}
@@ -209,11 +465,11 @@ export default function InboxPage() {
             <div
               key={item.id}
               style={{ ...s.navItem, ...(activeNav === item.id ? s.navActive : {}) }}
-              onClick={() => setActiveNav(item.id)}
+              onClick={() => { setActiveNav(item.id); setSelected(null); }}
             >
               <span>{item.icon}</span>
               <span>{item.label}</span>
-              {item.count > 0 && <span style={s.navBadge}>{item.count}</span>}
+              {item.id === 'inbox' && item.count > 0 && <span style={s.navBadge}>{item.count}</span>}
             </div>
           ))}
 
@@ -234,69 +490,85 @@ export default function InboxPage() {
           </div>
         </div>
 
-        {/* Message list */}
-        <div style={s.inboxPanel}>
-          <div style={s.inboxHeader}>
-            <span style={{ fontSize: '15px', fontWeight: '600' }}>Inbox</span>
-            <span style={{ fontSize: '11px', color: '#4a5568', fontFamily: 'monospace' }}>
-              {messages.length} messages · {unread} unread
-            </span>
-          </div>
-
-          <div style={s.privacyBanner}>
-            <span style={s.pDot} />
-            Metadata shield active · IP masked · Timestamps obfuscated ±2h · Zero server logging
-          </div>
-
-          <div style={s.msgList}>
-            {loading && <div style={s.empty}>Loading your inbox…</div>}
-
-            {!loading && messages.length === 0 && (
-              <div style={s.empty}>
-                <div style={{ fontSize: '36px', marginBottom: '14px' }}>📭</div>
-                <strong style={{ color: '#e8eaf0' }}>No messages yet</strong>
-                <p style={{ marginTop: '8px' }}>Share your alias so people can message you:</p>
-                <span
-                  style={{ color: '#00e5a0', fontFamily: 'monospace', fontSize: '13px', cursor: 'pointer', marginTop: '6px', display: 'block' }}
-                  onClick={copyAlias}
-                >
-                  {user?.alias}
+        {activeNav === 'keyring' ? (
+          renderKeyRingPanel()
+        ) : (
+          <>
+            {/* Message list */}
+            <div style={s.inboxPanel}>
+              <div style={s.inboxHeader}>
+                <span style={{ fontSize: '15px', fontWeight: '600' }}>
+                  {activeNav === 'inbox' && 'Inbox'}
+                  {activeNav === 'sent' && 'Sent Messages'}
+                  {activeNav === 'ephemeral' && 'Ephemeral Inbox'}
                 </span>
-                <p style={{ marginTop: '4px', fontSize: '11px' }}>(click to copy)</p>
+                <span style={{ fontSize: '11px', color: '#4a5568', fontFamily: 'monospace' }}>
+                  {messages.length} messages {activeNav === 'inbox' && `· ${unread} unread`}
+                </span>
               </div>
-            )}
 
-            {messages.map(msg => (
-              <div
-                key={msg.id}
-                style={{
-                  ...s.msgItem,
-                  ...(msg.is_read ? {} : s.msgUnread),
-                  ...(selected?.id === msg.id ? s.msgSelected : {}),
-                }}
-                onClick={() => openMessage(msg)}
-              >
-                <div style={{ ...s.msgAvatar, background: 'linear-gradient(135deg,#00e5a0,#0066ff)' }}>?</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: '3px' }}>
-                    <span style={{ fontSize: '13px', fontWeight: msg.is_read ? 400 : 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {msg.sender_alias}
-                    </span>
-                    <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#4a5568', fontFamily: 'monospace', paddingLeft: '8px', whiteSpace: 'nowrap' }}>
-                      {formatTime(msg.approximate_time)}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '11px', color: '#8892a4', marginBottom: '4px' }}>🔒 Encrypted message</div>
-                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                    <Tag color="#00e5a0" label="E2E" />
-                    <Tag color="#6a9fff" label={`${msg.routing_hops} hops`} />
-                    {msg.is_ephemeral ? <Tag color="#ff8888" label="ephemeral" /> : null}
-                  </div>
-                </div>
+              <div style={s.privacyBanner}>
+                <span style={s.pDot} />
+                Metadata shield active · IP masked · Timestamps obfuscated ±2h · Zero server logging
               </div>
-            ))}
-          </div>
-        </div>
+
+              <div style={s.msgList}>
+                {loading && <div style={s.empty}>Loading messages…</div>}
+
+                {!loading && messages.length === 0 && (
+                  <div style={s.empty}>
+                    <div style={{ fontSize: '36px', marginBottom: '14px' }}>📭</div>
+                    <strong style={{ color: '#e8eaf0' }}>No messages yet</strong>
+                    <p style={{ marginTop: '8px' }}>Share your alias so people can message you:</p>
+                    <span
+                      style={{ color: '#00e5a0', fontFamily: 'monospace', fontSize: '13px', cursor: 'pointer', marginTop: '6px', display: 'block' }}
+                      onClick={copyAlias}
+                    >
+                      {user?.alias}
+                    </span>
+                    <p style={{ marginTop: '4px', fontSize: '11px' }}>(click to copy)</p>
+                  </div>
+                )}
+
+                {messages.map(msg => (
+                  <div
+                    key={msg.id}
+                    style={{
+                      ...s.msgItem,
+                      ...((activeNav !== 'sent' && !msg.is_read) ? s.msgUnread : {}),
+                      ...(selected?.id === msg.id ? s.msgSelected : {}),
+                    }}
+                    onClick={() => openMessage(msg)}
+                  >
+                    <div style={{ ...s.msgAvatar, background: 'linear-gradient(135deg,#00e5a0,#0066ff)' }}>?</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', marginBottom: '3px' }}>
+                        <span style={{ fontSize: '13px', fontWeight: (activeNav !== 'sent' && !msg.is_read) ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {activeNav === 'sent' ? `To: ${msg.recipient_alias}` : msg.sender_alias}
+                        </span>
+                        <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#4a5568', fontFamily: 'monospace', paddingLeft: '8px', whiteSpace: 'nowrap' }}>
+                          {formatTime(msg.approximate_time)}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#8892a4', marginBottom: '4px' }}>🔒 Encrypted message</div>
+                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                        <Tag color="#00e5a0" label="E2E" />
+                        <Tag color="#6a9fff" label={`${msg.routing_hops} hops`} />
+                        {msg.is_ephemeral ? <Tag color="#ff8888" label="ephemeral" /> : null}
+                        {activeNav === 'sent' && (
+                          <Tag 
+                            color={msg.is_read ? "#00e5a0" : "#8892a4"} 
+                            label={msg.is_read ? "read" : "sent"} 
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Detail panel */}
         <div style={s.detail}>
@@ -399,7 +671,7 @@ export default function InboxPage() {
       </div>
 
       {/* Compose modal */}
-      {compose && <ComposeModal onClose={() => setCompose(false)} onSent={fetchInbox} />}
+      {compose && <ComposeModal onClose={() => setCompose(false)} onSent={fetchMessages} />}
 
     </div>
   );

@@ -15,7 +15,8 @@ export function connectSocket(token) {
     return socket;
   }
 
-  socket = io('http://localhost:3001', {
+  const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+  socket = io(serverUrl, {
     auth: { token },
     reconnectionDelay: 1000,
     reconnectionAttempts: 10,

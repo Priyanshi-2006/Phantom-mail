@@ -2,6 +2,17 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const { requireAuth } = require('../middleware/auth');
+const rateLimit = require('express-rate-limit');
+
+const sendMsgLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30,
+  keyGenerator: (req) => String(req.user?.alias || req.ip || 'unknown'),
+  validate: { keyGeneratorIpFallback: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Message sending limit exceeded. Try again later.' }
+});
 
 const router = express.Router();
 
@@ -10,10 +21,10 @@ function obfuscateTimestamp(t) {
 }
 
 // POST /api/messages/send
-router.post('/send', requireAuth, async (req, res) => {
+router.post('/send', requireAuth, sendMsgLimiter, async (req, res) => {
   const {
     recipient_alias, subject_encrypted, body_encrypted,
-    routing_hops = 3, is_ephemeral = false, ephemeral_hours = 48,
+    routing_hops = 3, is_ephemeral = false, expires_at = null,
   } = req.body;
 
   if (!recipient_alias || !subject_encrypted || !body_encrypted)
@@ -24,7 +35,7 @@ router.post('/send', requireAuth, async (req, res) => {
     if (!recipient) return res.status(404).json({ error: 'Recipient alias not found' });
 
     const id = uuidv4(), now = Date.now();
-    const expiresAt = is_ephemeral ? now + ephemeral_hours * 3600 * 1000 : null;
+    const expiresAt = is_ephemeral ? expires_at : null;
     const approxTime = obfuscateTimestamp(now);
 
     await db.prepare(`
@@ -82,8 +93,11 @@ router.get('/inbox', requireAuth, async (req, res) => {
 router.get('/sent/list', requireAuth, async (req, res) => {
   try {
     const msgs = await db.prepare(`
-      SELECT id, recipient_alias, subject_encrypted, approximate_time, is_ephemeral, routing_hops
-      FROM messages WHERE sender_alias = ? ORDER BY created_at DESC LIMIT 50
+      SELECT m.id, m.recipient_alias, m.subject_encrypted, m.approximate_time, m.is_ephemeral, m.routing_hops,
+             (CASE WHEN u.allow_read_receipts = 1 THEN m.is_read ELSE 0 END) as is_read
+      FROM messages m
+      LEFT JOIN users u ON m.recipient_alias = u.alias
+      WHERE m.sender_alias = ? ORDER BY m.created_at DESC LIMIT 50
     `).all(req.user.alias);
     res.json(msgs);
   } catch (err) {
@@ -98,6 +112,13 @@ router.get('/:id', requireAuth, async (req, res) => {
       'SELECT * FROM messages WHERE id = ? AND recipient_alias = ?'
     ).get(req.params.id, req.user.alias);
     if (!msg) return res.status(404).json({ error: 'Message not found' });
+
+    // Expiry check
+    if (msg.is_ephemeral && msg.expires_at && Date.now() > msg.expires_at) {
+      await db.prepare('DELETE FROM messages WHERE id = ?').run(req.params.id);
+      return res.status(404).json({ error: 'Message expired' });
+    }
+
     await db.prepare('UPDATE messages SET is_read = 1 WHERE id = ?').run(req.params.id);
     res.json(msg);
   } catch (err) {
