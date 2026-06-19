@@ -1,0 +1,224 @@
+import { useState, useEffect } from 'react';
+import api from '../utils/api';
+import { encryptMessage } from '../utils/crypto';
+
+export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
+  const [form, setForm] = useState({
+    to: defaultTo, subject: '', body: '',
+    hops: 3, ephemeral: false,
+  });
+  const [status, setStatus] = useState('');
+  const [error,  setError]  = useState('');
+  const [busy,   setBusy]   = useState(false);
+  const [recipientOnline, setRecipientOnline] = useState(null); // null, true, false
+  const [lookupError, setLookupError] = useState('');
+
+  // Debounced lookup of recipient alias status
+  useEffect(() => {
+    const toTrimmed = form.to.trim();
+    if (!toTrimmed || !toTrimmed.includes('-')) {
+      Promise.resolve().then(() => {
+        setRecipientOnline(null);
+        setLookupError('');
+      });
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api.get(`/keys/${toTrimmed}`);
+        setRecipientOnline(res.data.online);
+        setLookupError('');
+      } catch {
+        setRecipientOnline(null);
+        setLookupError('Recipient not found');
+      }
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [form.to]);
+
+  const set = (field) => (e) =>
+    setForm({ ...form, [field]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+
+  const send = async () => {
+    if (!form.to.trim() || !form.body.trim()) return;
+    setError(''); setBusy(true);
+
+    try {
+      // Step 1: fetch recipient's public key
+      setStatus('Looking up recipient…');
+      let pubKey;
+      try {
+        const res = await api.get(`/keys/${form.to.trim()}`);
+        pubKey = res.data.public_key;
+      } catch {
+        throw new Error('Recipient alias not found or has no public key yet.');
+      }
+
+      // Step 2: encrypt everything in the browser — server never sees plaintext
+      setStatus('Encrypting in your browser…');
+      const subjectEncrypted = await encryptMessage(
+        form.subject.trim() || '(no subject)', pubKey
+      );
+      const bodyEncrypted = await encryptMessage(form.body, pubKey);
+
+      // Step 3: send the ciphertext to server
+      setStatus('Sending through relay…');
+      await api.post('/messages/send', {
+        recipient_alias:  form.to.trim(),
+        subject_encrypted: subjectEncrypted,
+        body_encrypted:    bodyEncrypted,
+        routing_hops:      form.hops,
+        is_ephemeral:      form.ephemeral,
+        ephemeral_hours:   48,
+      });
+
+      setStatus('✓ Delivered');
+      setTimeout(() => { onSent(); onClose(); }, 700);
+
+    } catch (err) {
+      setError(err.message || err.response?.data?.error || 'Failed to send. Try again.');
+      setBusy(false); setStatus('');
+    }
+  };
+
+  return (
+    <div style={s.backdrop}>
+      <div style={s.modal}>
+
+        {/* Header */}
+        <div style={s.header}>
+          <span style={s.title}>New Encrypted Message</span>
+          <button style={s.closeBtn} onClick={onClose}>×</button>
+        </div>
+
+        {/* Fields */}
+        <div style={s.field}>
+          <label style={s.label}>To</label>
+          <input style={s.fieldInput} value={form.to} onChange={set('to')}
+            placeholder="recipient-alias  (e.g. ghost-7f3a2b)" autoFocus />
+          {recipientOnline !== null && (
+            <span style={{ fontSize: '11px', color: recipientOnline ? '#00e5a0' : '#8892a4', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+              ● {recipientOnline ? 'Online' : 'Offline'}
+            </span>
+          )}
+          {lookupError && (
+            <span style={{ fontSize: '11px', color: '#ff8888', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+              ⚠ Not found
+            </span>
+          )}
+        </div>
+        <div style={s.field}>
+          <label style={s.label}>Subject</label>
+          <input style={s.fieldInput} value={form.subject} onChange={set('subject')}
+            placeholder="Subject (optional)" />
+        </div>
+        <div style={s.field}>
+          <label style={s.label}>Hops</label>
+          <select style={{ ...s.fieldInput, cursor: 'pointer' }} value={form.hops}
+            onChange={(e) => setForm({ ...form, hops: +e.target.value })}>
+            <option value={2}>2 hops — faster</option>
+            <option value={3}>3 hops — balanced (recommended)</option>
+            <option value={4}>4 hops — more private</option>
+            <option value={5}>5 hops — maximum privacy</option>
+          </select>
+        </div>
+
+        {/* Body */}
+        <textarea style={s.body} value={form.body} onChange={set('body')}
+          placeholder="Write your message…&#10;&#10;It will be encrypted with AES-256 in your browser before leaving your device. The server only ever sees ciphertext." />
+
+        {/* Footer */}
+        <div style={s.footer}>
+          <label style={s.ephemeralLabel}>
+            <input type="checkbox" checked={form.ephemeral} onChange={set('ephemeral')} />
+            &nbsp;Ephemeral — auto-delete in 48 h
+          </label>
+
+          <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto', alignItems: 'center' }}>
+            {status && <span style={s.statusText}>{status}</span>}
+            {error  && <span style={s.errorText}>{error}</span>}
+            <button style={{ ...s.sendBtn, opacity: busy ? 0.7 : 1 }}
+              onClick={send} disabled={busy || !form.to.trim() || !form.body.trim()}>
+              {busy ? '…' : '🔒 Encrypt & Send'}
+            </button>
+          </div>
+        </div>
+
+        {/* Encryption badge row */}
+        <div style={s.badgeRow}>
+          <span style={s.badge('#00e5a0')}>E2E Encrypted</span>
+          <span style={s.badge('#6a9fff')}>{form.hops} Relay Hops</span>
+          {form.ephemeral && <span style={s.badge('#ff8888')}>Ephemeral</span>}
+          <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#4a5568', fontFamily: 'monospace' }}>
+            Private key never leaves your device
+          </span>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+const s = {
+  backdrop: {
+    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    zIndex: 300, fontFamily: "'IBM Plex Sans', sans-serif",
+  },
+  modal: {
+    background: '#171b22', border: '1px solid #232839', borderRadius: '12px',
+    width: '540px', maxWidth: '95vw', display: 'flex', flexDirection: 'column',
+    boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+  },
+  header: {
+    display: 'flex', alignItems: 'center', padding: '14px 18px',
+    background: '#1e2330', borderRadius: '12px 12px 0 0',
+    borderBottom: '1px solid #232839',
+  },
+  title: { fontWeight: '600', fontSize: '14px', flex: 1, color: '#e8eaf0' },
+  closeBtn: {
+    background: 'none', border: 'none', color: '#8892a4',
+    cursor: 'pointer', fontSize: '22px', lineHeight: 1, padding: '0 2px',
+  },
+  field: {
+    display: 'flex', alignItems: 'center', padding: '9px 16px',
+    borderBottom: '1px solid #232839', gap: '10px',
+  },
+  label: {
+    color: '#4a5568', fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: '11px', width: '54px', flexShrink: 0,
+  },
+  fieldInput: {
+    flex: 1, background: 'none', border: 'none', outline: 'none',
+    color: '#e8eaf0', fontSize: '13px', fontFamily: 'inherit',
+  },
+  body: {
+    flex: 1, margin: '12px 16px', minHeight: '150px', background: 'none',
+    border: 'none', outline: 'none', color: '#e8eaf0', fontSize: '13px',
+    fontFamily: "'IBM Plex Sans', sans-serif", resize: 'vertical', lineHeight: '1.65',
+  },
+  footer: {
+    display: 'flex', alignItems: 'center', gap: '10px',
+    padding: '11px 16px', borderTop: '1px solid #232839', flexWrap: 'wrap',
+  },
+  ephemeralLabel: { fontSize: '12px', color: '#8892a4', cursor: 'pointer', display: 'flex', alignItems: 'center' },
+  sendBtn: {
+    background: '#00e5a0', color: '#000', border: 'none', borderRadius: '6px',
+    padding: '9px 18px', fontWeight: '700', fontSize: '13px', cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+  statusText: { fontSize: '11px', color: '#00e5a0', fontFamily: 'monospace' },
+  errorText:  { fontSize: '11px', color: '#ff8888' },
+  badgeRow: {
+    display: 'flex', alignItems: 'center', gap: '6px',
+    padding: '8px 16px', borderTop: '1px solid #232839',
+    background: 'rgba(0,0,0,0.2)', borderRadius: '0 0 12px 12px',
+  },
+  badge: (color) => ({
+    fontSize: '9px', fontFamily: 'monospace', padding: '2px 7px',
+    borderRadius: '3px', letterSpacing: '.5px', textTransform: 'uppercase',
+    background: `${color}18`, color, border: `1px solid ${color}44`,
+  }),
+};
