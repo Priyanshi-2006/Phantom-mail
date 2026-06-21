@@ -1,17 +1,20 @@
 import { useState, useEffect } from 'react';
 import api from '../utils/api';
-import { encryptMessage } from '../utils/crypto';
+import { encryptMessage, encryptFile } from '../utils/crypto';
 
 export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
   const [form, setForm] = useState({
     to: defaultTo, subject: '', body: '',
     hops: 3, ttl: 'never',
   });
+  const [attachments, setAttachments] = useState([]);
   const [status, setStatus] = useState('');
   const [error,  setError]  = useState('');
   const [busy,   setBusy]   = useState(false);
   const [recipientOnline, setRecipientOnline] = useState(null); // null, true, false
   const [lookupError, setLookupError] = useState('');
+
+  const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB limit
 
   // Debounced lookup of recipient alias status
   useEffect(() => {
@@ -41,6 +44,23 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
   const set = (field) => (e) =>
     setForm({ ...form, [field]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
 
+  const handleFileChange = (e) => {
+    const files = Array.from(e.target.files);
+    const oversized = files.find(f => f.size > MAX_FILE_SIZE);
+    if (oversized) {
+      setError(`File "${oversized.name}" exceeds the 25MB limit.`);
+      e.target.value = null; // reset
+      return;
+    }
+    setError('');
+    setAttachments(prev => [...prev, ...files]);
+    e.target.value = null;
+  };
+
+  const removeAttachment = (index) => {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
+  };
+
   const send = async () => {
     if (!form.to.trim() || !form.body.trim()) return;
     setError(''); setBusy(true);
@@ -63,6 +83,21 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
       );
       const bodyEncrypted = await encryptMessage(form.body, pubKey);
 
+      let attachmentMetadata = [];
+      let encryptedBlobs = [];
+      
+      if (attachments.length > 0) {
+        setStatus('Encrypting attachments…');
+        for (const file of attachments) {
+          const { encryptedBlob, metadata } = await encryptFile(file, pubKey);
+          encryptedBlobs.push(encryptedBlob);
+          attachmentMetadata.push({
+             ...metadata,
+             file_size: file.size
+          });
+        }
+      }
+
       // Step 3: send the ciphertext to server
       setStatus('Sending through relay…');
       const isEphemeral = form.ttl !== 'never';
@@ -72,14 +107,22 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
         expiresAt = Date.now() + hours * 3600 * 1000;
       }
 
-      await api.post('/messages/send', {
-        recipient_alias:  form.to.trim(),
-        subject_encrypted: subjectEncrypted,
-        body_encrypted:    bodyEncrypted,
-        routing_hops:      form.hops,
-        is_ephemeral:      isEphemeral,
-        expires_at:        expiresAt,
-      });
+      const formData = new FormData();
+      formData.append('recipient_alias', form.to.trim());
+      formData.append('subject_encrypted', subjectEncrypted);
+      formData.append('body_encrypted', bodyEncrypted);
+      formData.append('routing_hops', form.hops);
+      formData.append('is_ephemeral', isEphemeral);
+      if (expiresAt) formData.append('expires_at', expiresAt);
+
+      if (encryptedBlobs.length > 0) {
+        formData.append('attachment_metadata', JSON.stringify(attachmentMetadata));
+        encryptedBlobs.forEach((blob, i) => {
+          formData.append('attachments', blob, `attachment_${i}.bin`);
+        });
+      }
+
+      await api.post('/messages/send', formData);
 
       setStatus('✓ Delivered');
       setTimeout(() => { onSent(); onClose(); }, 700);
@@ -136,6 +179,18 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
         <textarea style={s.body} value={form.body} onChange={set('body')}
           placeholder="Write your message…&#10;&#10;It will be encrypted with AES-256 in your browser before leaving your device. The server only ever sees ciphertext." />
 
+        {/* Attachments UI */}
+        {attachments.length > 0 && (
+          <div style={s.attachmentsBox}>
+            {attachments.map((file, i) => (
+              <div key={i} style={s.attachmentPill}>
+                <span style={s.attachmentName}>{file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)</span>
+                <button style={s.attachmentRemove} onClick={() => removeAttachment(i)}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Footer */}
         <div style={s.footer}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -156,6 +211,10 @@ export default function ComposeModal({ onClose, onSent, defaultTo = '' }) {
           </div>
 
           <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto', alignItems: 'center' }}>
+            <label style={s.attachLabel}>
+              📎 Attach
+              <input type="file" multiple onChange={handleFileChange} style={{ display: 'none' }} />
+            </label>
             {status && <span style={s.statusText}>{status}</span>}
             {error  && <span style={s.errorText}>{error}</span>}
             <button style={{ ...s.sendBtn, opacity: busy ? 0.7 : 1 }}
@@ -218,11 +277,25 @@ const s = {
     border: 'none', outline: 'none', color: '#e8eaf0', fontSize: '13px',
     fontFamily: "'IBM Plex Sans', sans-serif", resize: 'vertical', lineHeight: '1.65',
   },
+  attachmentsBox: {
+    margin: '0 16px 12px 16px', padding: '8px', background: 'rgba(0,0,0,0.2)',
+    borderRadius: '6px', border: '1px solid #232839', display: 'flex', flexWrap: 'wrap', gap: '6px'
+  },
+  attachmentPill: {
+    display: 'flex', alignItems: 'center', gap: '6px', background: '#111318',
+    padding: '4px 8px', borderRadius: '4px', border: '1px solid #232839'
+  },
+  attachmentName: { fontSize: '11px', color: '#8892a4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '180px' },
+  attachmentRemove: { background: 'none', border: 'none', color: '#ff8888', cursor: 'pointer', fontSize: '14px', lineHeight: 1, padding: '0 2px' },
   footer: {
     display: 'flex', alignItems: 'center', gap: '10px',
     padding: '11px 16px', borderTop: '1px solid #232839', flexWrap: 'wrap',
   },
   ephemeralLabel: { fontSize: '12px', color: '#8892a4', cursor: 'pointer', display: 'flex', alignItems: 'center' },
+  attachLabel: {
+    fontSize: '13px', color: '#e8eaf0', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+    background: '#111318', padding: '8px 12px', borderRadius: '6px', border: '1px solid #232839'
+  },
   sendBtn: {
     background: '#00e5a0', color: '#000', border: 'none', borderRadius: '6px',
     padding: '9px 18px', fontWeight: '700', fontSize: '13px', cursor: 'pointer',
@@ -241,3 +314,4 @@ const s = {
     background: `${color}18`, color, border: `1px solid ${color}44`,
   }),
 };
+

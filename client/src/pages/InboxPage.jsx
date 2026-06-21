@@ -43,6 +43,8 @@ export default function InboxPage() {
   const [messages, setMessages]   = useState([]);
   const [selected, setSelected]   = useState(null);
   const [decrypted, setDecrypted] = useState({ subject: '', body: '' });
+  const [decryptedAttachments, setDecryptedAttachments] = useState([]);
+  const [downloadingAttachment, setDownloadingAttachment] = useState(null);
   const [loading,   setLoading]   = useState(true);
   const [decrypting, setDecrypting] = useState(false);
   const [compose,   setCompose]   = useState(false);
@@ -136,6 +138,7 @@ export default function InboxPage() {
   const openMessage = async (msg) => {
     setSelected(msg);
     setDecrypted({ subject: '', body: '' });
+    setDecryptedAttachments([]);
 
     if (activeNav === 'sent') {
       setDecrypted({
@@ -179,6 +182,19 @@ export default function InboxPage() {
       const body    = await decryptMessage(full.data.body_encrypted, pk);
       setDecrypted({ subject, body });
 
+      const attachments = [];
+      if (full.data.attachments) {
+        for (const att of full.data.attachments) {
+           try {
+             const filename = await decryptMessage(att.filename_encrypted, pk);
+             attachments.push({ ...att, filename });
+           } catch {
+             attachments.push({ ...att, filename: 'decryption_failed.bin' });
+           }
+        }
+      }
+      setDecryptedAttachments(attachments);
+
       // Mark as read locally
       setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, is_read: 1 } : m));
 
@@ -196,6 +212,32 @@ export default function InboxPage() {
     await api.delete(`/messages/${id}`);
     setMessages(prev => prev.filter(m => m.id !== id));
     setSelected(null);
+  };
+
+  const downloadAttachment = async (att) => {
+    setDownloadingAttachment(att.id);
+    try {
+      const pk = loadPrivateKey();
+      
+      const res = await api.get(`/messages/${selected.id}/attachments/${att.id}/download`, {
+        responseType: 'blob'
+      });
+      const encryptedBlob = res.data;
+      
+      const { decryptFile } = await import('../utils/crypto');
+      const decryptedBlob = await decryptFile(encryptedBlob, att.encrypted_key, att.iv, pk);
+      
+      const url = URL.createObjectURL(decryptedBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = att.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(err.message || 'Failed to decrypt attachment.');
+    } finally {
+      setDownloadingAttachment(null);
+    }
   };
 
   // ── Keyring & settings handlers ──────────────────────────────────
@@ -555,6 +597,7 @@ export default function InboxPage() {
                         <Tag color="#00e5a0" label="E2E" />
                         <Tag color="#6a9fff" label={`${msg.routing_hops} hops`} />
                         {msg.is_ephemeral ? <Tag color="#ff8888" label="ephemeral" /> : null}
+                        {msg.has_attachments === 1 ? <Tag color="#ffc800" label="📎 files" /> : null}
                         {activeNav === 'sent' && (
                           <Tag 
                             color={msg.is_read ? "#00e5a0" : "#8892a4"} 
@@ -637,9 +680,34 @@ export default function InboxPage() {
                     Unlocking with RSA-OAEP private key…
                   </div>
                 ) : (
-                  <div style={{ fontSize: '13px', lineHeight: '1.8', color: '#e8eaf0', whiteSpace: 'pre-wrap' }}>
-                    {decrypted.body}
-                  </div>
+                  <>
+                    <div style={{ fontSize: '13px', lineHeight: '1.8', color: '#e8eaf0', whiteSpace: 'pre-wrap' }}>
+                      {decrypted.body}
+                    </div>
+
+                    {decryptedAttachments.length > 0 && (
+                      <div style={s.attachmentSection}>
+                        <div style={s.attachmentTitle}>📎 Attachments ({decryptedAttachments.length})</div>
+                        <div style={s.attachmentList}>
+                          {decryptedAttachments.map(att => (
+                            <div key={att.id} style={s.attachmentItem}>
+                              <div style={{ flex: 1, overflow: 'hidden' }}>
+                                <div style={s.attachmentName} title={att.filename}>{att.filename}</div>
+                                <div style={s.attachmentSize}>{(att.file_size / 1024 / 1024).toFixed(2)} MB</div>
+                              </div>
+                              <button 
+                                style={s.downloadBtn} 
+                                onClick={() => downloadAttachment(att)}
+                                disabled={downloadingAttachment === att.id}
+                              >
+                                {downloadingAttachment === att.id ? 'Decrypting…' : '⬇ Decrypt & Save'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -793,6 +861,13 @@ const s = {
     border: '1px solid #232839', borderRadius: '8px', flexShrink: 0,
   },
   detailBody: { flex: 1, overflowY: 'auto', padding: '16px 18px' },
+  attachmentSection: { marginTop: '24px', paddingTop: '16px', borderTop: '1px solid #232839' },
+  attachmentTitle: { fontSize: '11px', fontFamily: 'monospace', color: '#8892a4', marginBottom: '10px', textTransform: 'uppercase' },
+  attachmentList: { display: 'flex', flexDirection: 'column', gap: '8px' },
+  attachmentItem: { display: 'flex', alignItems: 'center', gap: '12px', background: '#171b22', border: '1px solid #232839', padding: '10px 14px', borderRadius: '8px' },
+  attachmentName: { fontSize: '13px', color: '#e8eaf0', fontWeight: '500', marginBottom: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  attachmentSize: { fontSize: '11px', color: '#4a5568', fontFamily: 'monospace' },
+  downloadBtn: { background: 'rgba(0,229,160,0.1)', color: '#00e5a0', border: '1px solid rgba(0,229,160,0.3)', padding: '6px 12px', borderRadius: '4px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', flexShrink: 0 },
   detailFooter: {
     padding: '12px 16px', borderTop: '1px solid #232839',
     display: 'flex', gap: '8px', flexShrink: 0,

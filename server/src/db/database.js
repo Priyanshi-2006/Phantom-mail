@@ -101,6 +101,18 @@ async function initDB() {
     created_at        ${bigIntType} NOT NULL
   )`);
 
+  await run(`CREATE TABLE IF NOT EXISTS attachments (
+    id                 TEXT PRIMARY KEY,
+    message_id         TEXT NOT NULL,
+    filename_encrypted TEXT NOT NULL,
+    encrypted_key      TEXT NOT NULL,
+    iv                 TEXT NOT NULL,
+    file_size          ${bigIntType} NOT NULL,
+    storage_path       TEXT NOT NULL,
+    created_at         ${bigIntType} NOT NULL,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+  )`);
+
   await run(`CREATE TABLE IF NOT EXISTS key_store (
     alias      TEXT PRIMARY KEY,
     public_key TEXT NOT NULL,

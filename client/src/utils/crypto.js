@@ -96,6 +96,84 @@ export async function decryptMessage(encryptedJson, privateKeyB64) {
   return new TextDecoder().decode(decrypted);
 }
 
+// Encrypt a file (Blob/File) for the recipient.
+// Returns the raw binary Blob and metadata for the FormData.
+export async function encryptFile(file, recipientPubKeyB64) {
+  const pubKey = await importPublicKey(recipientPubKeyB64);
+
+  // 1. Generate a random one-time AES key for the file
+  const aesKey = await crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+
+  // 2. Encrypt the file data
+  const fileBuffer = await file.arrayBuffer();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  
+  const encryptedBuffer = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    aesKey,
+    fileBuffer
+  );
+
+  // 3. Encrypt the AES key with RSA
+  const rawAesKey = await crypto.subtle.exportKey('raw', aesKey);
+  const encryptedKey = await crypto.subtle.encrypt(
+    { name: 'RSA-OAEP' },
+    pubKey,
+    rawAesKey
+  );
+
+  // 4. Encrypt the original filename using standard message encryption
+  const filename_encrypted = await encryptMessage(file.name, recipientPubKeyB64);
+
+  const encryptedBlob = new Blob([encryptedBuffer], { type: 'application/octet-stream' });
+
+  return {
+    encryptedBlob,
+    metadata: {
+      filename_encrypted,
+      encrypted_key: ab2b64(encryptedKey),
+      iv: ab2b64(iv)
+    }
+  };
+}
+
+// Decrypt a file Blob using your private key
+export async function decryptFile(encryptedBlob, encryptedKeyB64, ivB64, privateKeyB64) {
+  const privKey = await importPrivateKey(privateKeyB64);
+
+  try {
+    const rawAesKey = await crypto.subtle.decrypt(
+      { name: 'RSA-OAEP' },
+      privKey,
+      b642ab(encryptedKeyB64)
+    );
+
+    const aesKey = await crypto.subtle.importKey(
+      'raw', rawAesKey,
+      { name: 'AES-GCM' },
+      false,
+      ['decrypt']
+    );
+
+    const encryptedBuffer = await encryptedBlob.arrayBuffer();
+
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: b642ab(ivB64) },
+      aesKey,
+      encryptedBuffer
+    );
+
+    return new Blob([decryptedBuffer], { type: 'application/octet-stream' });
+  } catch (err) {
+    console.error('File decryption error:', err);
+    throw new Error('This attachment could not be decrypted. The data may be corrupted.');
+  }
+}
+
 // Save/load private key from localStorage
 export const savePrivateKey = (key) => localStorage.setItem('pm_private_key', key);
 export const loadPrivateKey = ()    => localStorage.getItem('pm_private_key');
