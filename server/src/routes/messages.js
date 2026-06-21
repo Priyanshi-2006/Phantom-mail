@@ -36,6 +36,7 @@ const upload = multer({
   }) : multer.diskStorage({
     destination: os.tmpdir(),
     filename: (req, file, cb) => cb(null, uuidv4())
+    // NOTE: For local dev only. These temp files are never cleaned up automatically.
   }),
   limits: { fileSize: 25 * 1024 * 1024 } // 25MB cap
 });
@@ -71,7 +72,8 @@ router.post('/send', requireAuth, sendMsgLimiter, upload.array('attachments'), a
     if (!recipient) return res.status(404).json({ error: 'Recipient alias not found' });
 
     const id = uuidv4(), now = Date.now();
-    const expiresAt = (is_ephemeral || is_ephemeral === 'true') ? expires_at : null;
+    const isEphemeralBool = (is_ephemeral === 'true' || is_ephemeral === true);
+    const expiresAt = isEphemeralBool ? expires_at : null;
     const approxTime = obfuscateTimestamp(now);
 
     await db.prepare(`
@@ -83,7 +85,7 @@ router.post('/send', requireAuth, sendMsgLimiter, upload.array('attachments'), a
       id, recipient_alias, req.user.alias,
       subject_encrypted, body_encrypted,
       routing_hops, approxTime,
-      (is_ephemeral === 'true' || is_ephemeral === true) ? 1 : 0, expiresAt, now
+      isEphemeralBool ? 1 : 0, expiresAt, now
     );
 
     // Process attachments
@@ -129,7 +131,7 @@ router.post('/send', requireAuth, sendMsgLimiter, upload.array('attachments'), a
         routing_hops,
         approximate_time: approxTime,
         is_read:         0,
-        is_ephemeral:    (is_ephemeral === 'true' || is_ephemeral === true) ? 1 : 0,
+        is_ephemeral:    isEphemeralBool ? 1 : 0,
         expires_at:      expiresAt,
         has_attachments: req.files && req.files.length > 0 ? 1 : 0
       });
@@ -149,11 +151,9 @@ router.get('/inbox', requireAuth, async (req, res) => {
     const msgs = await db.prepare(`
       SELECT m.id, m.sender_alias, m.subject_encrypted, m.approximate_time,
              m.is_read, m.is_ephemeral, m.expires_at, m.routing_hops,
-             CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END as has_attachments
+             CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id) THEN 1 ELSE 0 END as has_attachments
       FROM messages m
-      LEFT JOIN attachments a ON m.id = a.message_id
       WHERE m.recipient_alias = ?
-      GROUP BY m.id
       ORDER BY m.created_at DESC LIMIT 50
     `).all(req.user.alias);
     res.json(msgs);
@@ -169,12 +169,10 @@ router.get('/sent/list', requireAuth, async (req, res) => {
     const msgs = await db.prepare(`
       SELECT m.id, m.recipient_alias, m.subject_encrypted, m.approximate_time, m.is_ephemeral, m.routing_hops,
              (CASE WHEN u.allow_read_receipts = 1 THEN m.is_read ELSE 0 END) as is_read,
-             CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END as has_attachments
+             CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id) THEN 1 ELSE 0 END as has_attachments
       FROM messages m
       LEFT JOIN users u ON m.recipient_alias = u.alias
-      LEFT JOIN attachments a ON m.id = a.message_id
       WHERE m.sender_alias = ? 
-      GROUP BY m.id
       ORDER BY m.created_at DESC LIMIT 50
     `).all(req.user.alias);
     res.json(msgs);
@@ -234,6 +232,10 @@ router.get('/:id/attachments/:attachmentId/download', requireAuth, async (req, r
       });
       const s3Response = await s3Client.send(command);
       res.setHeader('Content-Type', 'application/octet-stream');
+      s3Response.Body.on('error', (err) => {
+        console.error('S3 stream error:', err);
+        if (!res.headersSent) res.status(500).json({ error: 'Download failed' });
+      });
       s3Response.Body.pipe(res);
     } else {
       // Local fallback
@@ -249,6 +251,8 @@ router.get('/:id/attachments/:attachmentId/download', requireAuth, async (req, r
 // DELETE /api/messages/:id
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
+    // TODO: ON DELETE CASCADE handles DB row cleanup, but leaves orphaned S3 blobs.
+    // Need a future cron job to diff B2 objects against attachments table to delete orphaned files.
     const r = await db.prepare(
       'DELETE FROM messages WHERE id = ? AND recipient_alias = ?'
     ).run(req.params.id, req.user.alias);
