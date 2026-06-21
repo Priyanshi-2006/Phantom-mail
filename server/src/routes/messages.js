@@ -73,7 +73,7 @@ router.post('/send', requireAuth, sendMsgLimiter, upload.array('attachments'), a
 
     const id = uuidv4(), now = Date.now();
     const isEphemeralBool = (is_ephemeral === 'true' || is_ephemeral === true);
-    const expiresAt = isEphemeralBool ? expires_at : null;
+    const expiresAt = isEphemeralBool ? parseInt(expires_at, 10) : null;
     const approxTime = obfuscateTimestamp(now);
 
     await db.prepare(`

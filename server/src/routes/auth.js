@@ -32,8 +32,13 @@ router.post('/register', async (req, res) => {
     res.status(201).json({ token, user: { id, username, alias } });
 
   } catch (err) {
-    if (err.message && err.message.includes('UNIQUE'))
+    const isUniqueViolation = 
+      err.code === '23505' || // Postgres
+      (err.message && /UNIQUE/i.test(err.message)); // SQLite
+
+    if (isUniqueViolation) {
       return res.status(409).json({ error: 'Username or email already taken' });
+    }
     console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
