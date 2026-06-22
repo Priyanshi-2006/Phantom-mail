@@ -119,6 +119,34 @@ async function initDB() {
     updated_at ${bigIntType} NOT NULL
   )`);
 
+  // ── Phantom Groups tables ────────────────────────────────────
+  await run(`CREATE TABLE IF NOT EXISTS groups (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    creator_alias       TEXT NOT NULL,
+    current_key_version ${smallIntType} DEFAULT 1,
+    created_at          ${bigIntType} NOT NULL
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS group_members (
+    group_id            TEXT NOT NULL,
+    member_alias        TEXT NOT NULL,
+    encrypted_group_key TEXT NOT NULL,
+    key_version         ${smallIntType} DEFAULT 1,
+    joined_at           ${bigIntType} NOT NULL,
+    PRIMARY KEY (group_id, member_alias)
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS group_messages (
+    id                TEXT PRIMARY KEY,
+    group_id          TEXT NOT NULL,
+    sender_alias      TEXT NOT NULL,
+    body_encrypted    TEXT NOT NULL,
+    key_version       ${smallIntType} NOT NULL,
+    approximate_time  ${bigIntType} NOT NULL,
+    created_at        ${bigIntType} NOT NULL
+  )`);
+
   // Migration: Add allow_read_receipts to users table if it doesn't exist
   try {
     await run(`ALTER TABLE users ADD COLUMN allow_read_receipts ${smallIntType} DEFAULT 1`);

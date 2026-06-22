@@ -57,6 +57,7 @@ app.set('io', io);
 app.use('/api/auth',     require('./routes/auth'));
 app.use('/api/messages', require('./routes/messages'));
 app.use('/api/keys',     require('./routes/keys'));
+app.use('/api/groups',   require('./routes/groups'));
 app.get('/api/health',   (req, res) => res.json({ status: 'ok', time: Date.now() }));
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
@@ -84,6 +85,26 @@ io.on('connection', (socket) => {
   db.prepare('UPDATE users SET last_seen = ? WHERE alias = ?')
     .run(Date.now(), socket.user.alias)
     .catch(err => console.error('Failed to update last_seen on connect:', err));
+
+  // Join all group rooms this user belongs to
+  db.prepare('SELECT group_id FROM group_members WHERE member_alias = ?')
+    .all(socket.user.alias)
+    .then(groups => {
+      groups.forEach(g => socket.join(`group:${g.group_id}`));
+      if (groups.length > 0) console.log(`  👥 ${socket.user.alias} joined ${groups.length} group rooms`);
+    })
+    .catch(err => console.error('Failed to join group rooms:', err));
+
+  // Dynamic group room management
+  socket.on('join_group', (groupId) => {
+    socket.join(`group:${groupId}`);
+    console.log(`  👥 ${socket.user.alias} joined group room: ${groupId}`);
+  });
+
+  socket.on('leave_group', (groupId) => {
+    socket.leave(`group:${groupId}`);
+    console.log(`  👥 ${socket.user.alias} left group room: ${groupId}`);
+  });
 
   socket.on('disconnect', () => {
     console.log(`  ✗ ${socket.user.alias} disconnected`);

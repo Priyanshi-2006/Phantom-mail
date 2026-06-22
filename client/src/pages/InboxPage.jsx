@@ -10,6 +10,7 @@ import {
 } from '../utils/crypto';
 import { getSocket } from '../utils/socket';
 import ComposeModal from '../components/ComposeModal';
+import GroupPanel from '../components/GroupPanel';
 import api from '../utils/api';
 
 // ── Tiny helper components ─────────────────────────────────────
@@ -84,7 +85,7 @@ export default function InboxPage() {
 
   useEffect(() => {
     Promise.resolve().then(() => {
-      if (activeNav !== 'keyring') {
+      if (activeNav !== 'keyring' && activeNav !== 'groups') {
         fetchMessages();
       }
     });
@@ -127,7 +128,7 @@ export default function InboxPage() {
 
   // Poll for new messages every 15 seconds ONLY as a fallback if WebSocket is disconnected
   useEffect(() => {
-    if (socketConnected || activeNav === 'keyring') return;
+    if (socketConnected || activeNav === 'keyring' || activeNav === 'groups') return;
 
     const interval = setInterval(fetchMessages, 15000);
     return () => clearInterval(interval);
@@ -502,6 +503,7 @@ export default function InboxPage() {
             { id: 'inbox',     icon: '📥', label: 'Inbox',    count: unread },
             { id: 'sent',      icon: '📤', label: 'Sent' },
             { id: 'ephemeral', icon: '🔥', label: 'Ephemeral' },
+            { id: 'groups',    icon: '👥', label: 'Groups' },
             { id: 'keyring',   icon: '🔑', label: 'Key Ring' },
           ].map(item => (
             <div
@@ -534,6 +536,8 @@ export default function InboxPage() {
 
         {activeNav === 'keyring' ? (
           renderKeyRingPanel()
+        ) : activeNav === 'groups' ? (
+          <GroupPanel user={user} socketConnected={socketConnected} />
         ) : (
           <>
             {/* Message list */}

@@ -15,6 +15,7 @@ PhantomMail doesn't just promise privacy; it mathematically enforces it through 
 | Feature | How it works |
 |---|---|
 | **E2E Encryption** | WebCrypto API (RSA-OAEP 2048 + AES-256-GCM). The browser encrypts all subjects and bodies before they ever touch the network. |
+| **Phantom Groups** | AES-256-GCM symmetric keys shared securely via RSA key wrapping. Features atomic group key rotation upon member removal to preserve forward secrecy. |
 | **Zero-Knowledge Server** | The backend only handles and routes opaque ciphertext blobs. It cannot read your messages. |
 | **Alias System** | No real emails or phone numbers. Users are assigned random burner aliases (e.g., `ghost-7f3a2b`). |
 | **Metadata Obfuscation** | The server adds ±2 hours of random noise to message timestamps to prevent correlation attacks. |
@@ -81,6 +82,7 @@ phantommail/
       middleware/auth.js    — JWT verification
       routes/auth.js        — Authentication & Settings
       routes/messages.js    — Message routing, TTL expiration, Rate limiting
+      routes/groups.js      — Group creation, messaging, and atomic key rotation
       routes/keys.js        — Public key distribution
       index.js              — Express & Socket.io Entry
   client/
@@ -89,4 +91,5 @@ phantommail/
       utils/crypto.js       — WebCrypto logic (RSA/AES/PBKDF2)
       utils/socket.js       — Real-time WebSocket connection handling
       pages/                — React UI Views
+      components/           — ComposeModal, GroupPanel, etc.
 ```

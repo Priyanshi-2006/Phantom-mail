@@ -178,6 +178,81 @@ export async function decryptFile(encryptedBlob, encryptedKeyB64, ivB64, private
 export const savePrivateKey = (key) => localStorage.setItem('pm_private_key', key);
 export const loadPrivateKey = ()    => localStorage.getItem('pm_private_key');
 
+// ── Group Encryption Helpers ──────────────────────────────────
+
+// Generate a random AES-256 group key, returns base64 string
+export async function generateGroupKey() {
+  const key = await crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+  const raw = await crypto.subtle.exportKey('raw', key);
+  return ab2b64(raw);
+}
+
+// Encrypt an AES group key (base64) with a member's RSA public key (base64)
+export async function encryptGroupKey(groupKeyB64, memberPubKeyB64) {
+  const pubKey = await importPublicKey(memberPubKeyB64);
+  const groupKeyRaw = b642ab(groupKeyB64);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'RSA-OAEP' },
+    pubKey,
+    groupKeyRaw
+  );
+  return ab2b64(encrypted);
+}
+
+// Decrypt your encrypted group key using your RSA private key
+export async function decryptGroupKey(encryptedGroupKeyB64, privateKeyB64) {
+  const privKey = await importPrivateKey(privateKeyB64);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'RSA-OAEP' },
+    privKey,
+    b642ab(encryptedGroupKeyB64)
+  );
+  return ab2b64(decrypted);
+}
+
+// Encrypt a plaintext message with the shared AES group key (symmetric only — no RSA)
+export async function encryptGroupMessage(plaintext, groupKeyB64) {
+  const keyData = b642ab(groupKeyB64);
+  const aesKey = await crypto.subtle.importKey(
+    'raw', keyData,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    aesKey,
+    new TextEncoder().encode(plaintext)
+  );
+  return JSON.stringify({
+    iv: ab2b64(iv),
+    body: ab2b64(encrypted),
+  });
+}
+
+// Decrypt a group message with the shared AES group key
+export async function decryptGroupMessage(encryptedJson, groupKeyB64) {
+  const { iv, body } = JSON.parse(encryptedJson);
+  const keyData = b642ab(groupKeyB64);
+  const aesKey = await crypto.subtle.importKey(
+    'raw', keyData,
+    { name: 'AES-GCM' },
+    false,
+    ['decrypt']
+  );
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: b642ab(iv) },
+    aesKey,
+    b642ab(body)
+  );
+  return new TextDecoder().decode(decrypted);
+}
+
 // ── Internal helpers ───────────────────────────────────────────
 
 async function importPublicKey(b64) {
